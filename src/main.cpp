@@ -18,6 +18,7 @@ struct Options {
     std::string restoreFile;
     uint32_t appId = 410340;
     bool appIdOverridden = false;
+    size_t batchSize = 10;
 };
 
 static void PrintUsage(const char* programName) {
@@ -30,6 +31,7 @@ static void PrintUsage(const char* programName) {
               << "  --restore <file.json>  Subscribe to all items in a backup file\n"
               << "  --appid <id>           Override AppID (default: 410340)\n"
               << "  --dry-run              Simulate without making changes\n"
+              << "  --batch-size <n>       Concurrent operations per batch (default: 10, max: 50)\n"
               << "  --help                 Show this help message\n";
 }
 
@@ -75,6 +77,19 @@ static bool ParseArgs(int argc, char* argv[], Options& opts) {
                 opts.appIdOverridden = true;
             } catch (...) {
                 std::cerr << "Error: Invalid AppID value.\n";
+                return false;
+            }
+        } else if (arg == "--batch-size") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --batch-size requires a numeric argument.\n";
+                return false;
+            }
+            try {
+                opts.batchSize = static_cast<size_t>(std::stoul(argv[++i]));
+                if (opts.batchSize == 0) opts.batchSize = 1;
+                if (opts.batchSize > MAX_BATCH_SIZE) opts.batchSize = MAX_BATCH_SIZE;
+            } catch (...) {
+                std::cerr << "Error: Invalid batch size value.\n";
                 return false;
             }
         } else if (arg == "--help" || arg == "-h") {
@@ -142,7 +157,7 @@ static int DoBackup(WorkshopManager& mgr, uint32_t appId) {
     return 0;
 }
 
-static int DoUnsubscribeAll(WorkshopManager& mgr, bool dryRun) {
+static int DoUnsubscribeAll(WorkshopManager& mgr, bool dryRun, size_t batchSize) {
     auto items = mgr.GetSubscribedItems();
     if (items.empty()) {
         std::cout << "No subscribed Workshop items to unsubscribe from.\n";
@@ -167,25 +182,30 @@ static int DoUnsubscribeAll(WorkshopManager& mgr, bool dryRun) {
         return 0;
     }
 
-    size_t succeeded = 0;
-    size_t failed = 0;
-    for (size_t i = 0; i < items.size(); ++i) {
-        std::cout << "[" << (i + 1) << "/" << items.size() << "] Unsubscribing from " << items[i] << "... ";
+    std::cout << "Unsubscribing (batch size: " << batchSize << ")...\n";
+    auto result = mgr.UnsubscribeBatch(items, batchSize, [](size_t completed, size_t total, size_t succeeded, size_t failed) {
+        std::cout << "  [" << completed << "/" << total << "] OK: " << succeeded << ", Failed: " << failed << "\n";
         std::cout.flush();
-        if (mgr.UnsubscribeItem(items[i])) {
-            std::cout << "OK\n";
-            ++succeeded;
-        } else {
-            std::cout << "FAILED\n";
-            ++failed;
+    });
+
+    std::cout << "\nDone. Unsubscribed: " << result.succeeded << ", Failed: " << result.failed << "\n";
+
+    if (!result.failedItems.empty()) {
+        std::cout << "\nFailed items:\n";
+        for (const auto& f : result.failedItems) {
+            std::cout << "  " << f.id << " — ";
+            if (f.ioFailure) {
+                std::cout << "IO failure (network error)\n";
+            } else {
+                std::cout << EResultToString(f.errorCode) << " (code " << static_cast<int>(f.errorCode) << ")\n";
+            }
         }
     }
 
-    std::cout << "\nDone. Unsubscribed: " << succeeded << ", Failed: " << failed << "\n";
-    return (failed > 0) ? 1 : 0;
+    return (result.failed > 0) ? 1 : 0;
 }
 
-static int DoRestore(WorkshopManager& mgr, const std::string& filename, bool dryRun) {
+static int DoRestore(WorkshopManager& mgr, const std::string& filename, bool dryRun, size_t batchSize) {
     std::ifstream f(filename);
     if (!f.is_open()) {
         std::cerr << "Error: Could not open " << filename << "\n";
@@ -232,22 +252,27 @@ static int DoRestore(WorkshopManager& mgr, const std::string& filename, bool dry
         return 0;
     }
 
-    size_t succeeded = 0;
-    size_t failed = 0;
-    for (size_t i = 0; i < subscriptions.size(); ++i) {
-        std::cout << "[" << (i + 1) << "/" << subscriptions.size() << "] Subscribing to " << subscriptions[i] << "... ";
+    std::cout << "Subscribing (batch size: " << batchSize << ")...\n";
+    auto result = mgr.SubscribeBatch(subscriptions, batchSize, [](size_t completed, size_t total, size_t succeeded, size_t failed) {
+        std::cout << "  [" << completed << "/" << total << "] OK: " << succeeded << ", Failed: " << failed << "\n";
         std::cout.flush();
-        if (mgr.SubscribeItem(subscriptions[i])) {
-            std::cout << "OK\n";
-            ++succeeded;
-        } else {
-            std::cout << "FAILED\n";
-            ++failed;
+    });
+
+    std::cout << "\nDone. Subscribed: " << result.succeeded << ", Failed: " << result.failed << "\n";
+
+    if (!result.failedItems.empty()) {
+        std::cout << "\nFailed items:\n";
+        for (const auto& f : result.failedItems) {
+            std::cout << "  " << f.id << " — ";
+            if (f.ioFailure) {
+                std::cout << "IO failure (network error)\n";
+            } else {
+                std::cout << EResultToString(f.errorCode) << " (code " << static_cast<int>(f.errorCode) << ")\n";
+            }
         }
     }
 
-    std::cout << "\nDone. Subscribed: " << succeeded << ", Failed: " << failed << "\n";
-    return (failed > 0) ? 1 : 0;
+    return (result.failed > 0) ? 1 : 0;
 }
 
 int main(int argc, char* argv[]) {
@@ -279,11 +304,11 @@ int main(int argc, char* argv[]) {
     }
 
     if (result == 0 && opts.unsubscribeAll) {
-        result = DoUnsubscribeAll(mgr, opts.dryRun);
+        result = DoUnsubscribeAll(mgr, opts.dryRun, opts.batchSize);
     }
 
     if (result == 0 && !opts.restoreFile.empty()) {
-        result = DoRestore(mgr, opts.restoreFile, opts.dryRun);
+        result = DoRestore(mgr, opts.restoreFile, opts.dryRun, opts.batchSize);
     }
 
     mgr.Shutdown();

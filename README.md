@@ -25,6 +25,8 @@ CLI tool for managing Steam Workshop subscriptions across multiple accounts. Bac
 - **Unsubscribe All** — Bulk unsubscribe from every Workshop item, with a safety confirmation prompt
 - **List** — Print all currently subscribed Workshop items
 - **Dry Run** — Preview any destructive operation without making changes
+- **Batch Processing** — Concurrent operations (configurable batch size) for fast bulk subscribe/unsubscribe
+- **Auto-Retry** — Failed items are automatically retried up to 3 times with backoff, with detailed error reporting
 - **Multi-Account** — Backup files are per-account, enabling easy subscription migration
 
 ---
@@ -145,6 +147,7 @@ Options:
   --restore <file.json>  Subscribe to all items in a backup file
   --appid <id>           Override AppID (default: 410340)
   --dry-run              Simulate without making changes
+  --batch-size <n>       Concurrent operations per batch (default: 10, max: 50)
   --help                 Show help
 ```
 
@@ -195,13 +198,15 @@ Output:
 ```
 Logged in as SteamID: 76561198012345678
 
-Found 3 subscribed items.
-Are you sure you want to unsubscribe from ALL 3 items? [y/N] y
-[1/3] Unsubscribing from 123456789... OK
-[2/3] Unsubscribing from 234567890... OK
-[3/3] Unsubscribing from 345678901... OK
+Found 200 subscribed items.
+Are you sure you want to unsubscribe from ALL 200 items? [y/N] y
+Unsubscribing (batch size: 10)...
+  [10/200] OK: 10, Failed: 0
+  [20/200] OK: 20, Failed: 0
+  ...
+  [200/200] OK: 200, Failed: 0
 
-Done. Unsubscribed: 3, Failed: 0
+Done. Unsubscribed: 200, Failed: 0
 ```
 
 Preview first with `--dry-run`:
@@ -225,13 +230,29 @@ Logged in as SteamID: 76561198099999999
 Backup from SteamID: 76561198012345678
 Backup AppID: 410340
 Backup timestamp: 2026-04-11T10:00:00Z
-Items to restore: 3
-[1/3] Subscribing to 123456789... OK
-[2/3] Subscribing to 234567890... OK
-[3/3] Subscribing to 345678901... OK
+Items to restore: 500
+Subscribing (batch size: 10)...
+  [10/500] OK: 10, Failed: 0
+  [20/500] OK: 20, Failed: 0
+  ...
+  [500/500] OK: 497, Failed: 3
 
-Done. Subscribed: 3, Failed: 0
+Done. Subscribed: 497, Failed: 3
+
+Failed items:
+  123456789 — Item not found (code 9)
+  234567890 — Access denied (code 15)
+  345678901 — Item not found (code 9)
 ```
+
+Failed items are automatically retried up to 3 times before being reported. Common failure reasons:
+
+| Error | Meaning |
+|---|---|
+| Item not found (9) | Workshop item was deleted by the author |
+| Access denied (15) | Item is private or region-locked |
+| Rate/limit exceeded (25) | Steam throttled requests (retries handle this) |
+| IO failure | Transient network error (retries handle this) |
 
 ### Using a Different Game
 
@@ -304,6 +325,29 @@ Backup files are named by SteamID64, so multiple backups coexist in the same dir
 
 ---
 
+## Performance
+
+The tool processes subscribe/unsubscribe operations in concurrent batches. The `--batch-size` flag controls how many operations run simultaneously (default: 10).
+
+| Batch Size | ~Time for 1,000 items |
+|---|---|
+| 1 | ~3.5 min |
+| 10 (default) | ~25 sec |
+| 25 | ~12 sec |
+| 50 (max) | ~8 sec |
+
+```bash
+# Default batch size (10)
+./steam-subber --restore backup.json
+
+# Faster for large imports
+./steam-subber --batch-size 25 --restore backup.json
+```
+
+Start with the default. If you see no failures, you can increase the batch size for subsequent runs.
+
+---
+
 ## Troubleshooting
 
 ### "Failed to initialize Steam API"
@@ -316,10 +360,14 @@ Backup files are named by SteamID64, so multiple backups coexist in the same dir
 
 - The Steam client may be outdated. Update Steam and try again.
 
-### Callback timeout (operation reported as FAILED)
+### Items reported as FAILED
 
-- Steam servers may be temporarily unavailable. Wait a moment and retry.
-- Check your internet connection.
+- The tool automatically retries failed items up to 3 times with increasing backoff
+- After all retries, a detailed failure summary is printed with the item ID and error reason
+- **Item not found (code 9)**: The Workshop item was deleted by its author — nothing you can do
+- **Access denied (code 15)**: The item is private or restricted
+- **Rate/limit exceeded (code 25)**: Try again with a smaller `--batch-size`
+- **Timeout (code 16)**: Steam servers may be slow — try again later
 
 ### No items appear in --list but you have subscriptions
 
