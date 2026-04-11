@@ -1,0 +1,15 @@
+build/
+cmake-build-*/
+out/
+.vs/
+.vscode/
+CMakeSettings.json
+CMakeUserPresets.json
+*.exe
+*.dll
+*.obj
+*.lib
+*.pdb
+*.ilk
+*.exp
+steam_appid.txt
