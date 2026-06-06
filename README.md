@@ -1,6 +1,6 @@
 # Steam Workshop Subscription Manager
 
-CLI tool for managing Steam Workshop subscriptions across multiple accounts. Back up subscribed item IDs to JSON, bulk unsubscribe, and restore/copy subscriptions between accounts. Built with the Steamworks SDK (ISteamUGC) and nlohmann/json. Supports dry-run mode and custom AppIDs.
+CLI tool for managing Steam Workshop subscriptions across multiple accounts. Back up subscribed item IDs to JSON, bulk unsubscribe, restore/copy subscriptions between accounts, and create Workshop collections from your subscriptions or a backup file. Built with the Steamworks SDK (ISteamUGC) and nlohmann/json. Supports dry-run mode and custom AppIDs.
 
 ---
 
@@ -24,6 +24,7 @@ CLI tool for managing Steam Workshop subscriptions across multiple accounts. Bac
 - **Restore** — Subscribe to every item in a backup file (copy subscriptions between accounts)
 - **Unsubscribe All** — Bulk unsubscribe from every Workshop item, with a safety confirmation prompt
 - **List** — Print all currently subscribed Workshop items
+- **Create Collection** — Create a Workshop collection and populate it from your current subscriptions or a backup file
 - **Dry Run** — Preview any destructive operation without making changes
 - **Batch Processing** — Concurrent operations (configurable batch size) for fast bulk subscribe/unsubscribe
 - **Auto-Retry** — Failed items are automatically retried up to 3 times with backoff, with detailed error reporting
@@ -145,6 +146,15 @@ Options:
   --list                 Print all subscribed Workshop items
   --unsubscribe-all      Unsubscribe from all Workshop items (with confirmation)
   --restore <file.json>  Subscribe to all items in a backup file
+  --create-collection <title>
+                         Create a Workshop collection and add items to it
+  --collection-desc <text>
+                         Description for the new collection (optional)
+  --collection-visibility <public|friends|private|unlisted>
+                         Visibility of the new collection (default: private)
+  --from-subscribed      Populate collection from current subscriptions
+  --from-file <file.json>
+                         Populate collection from a backup file's items
   --appid <id>           Override AppID (default: 410340)
   --dry-run              Simulate without making changes
   --batch-size <n>       Concurrent operations per batch (default: 10, max: 50)
@@ -253,6 +263,49 @@ Failed items are automatically retried up to 3 times before being reported. Comm
 | Access denied (15) | Item is private or region-locked |
 | Rate/limit exceeded (25) | Steam throttled requests (retries handle this) |
 | IO failure | Transient network error (retries handle this) |
+
+### Create a Collection
+
+Create a Workshop collection on the logged-in account and populate it with items.
+Choose exactly one item source: `--from-subscribed` (your current subscriptions)
+or `--from-file <backup.json>` (the items in a backup file).
+
+```bash
+# Build a collection from everything you're currently subscribed to
+./steam-subber --create-collection "My Favorite Mods" --from-subscribed
+
+# Build a collection from a backup file, with a description, visible to friends
+./steam-subber --create-collection "Server Pack" \
+  --collection-desc "Mods for our private server" \
+  --collection-visibility friends \
+  --from-file 76561198012345678.json
+```
+
+Output:
+```
+Logged in as SteamID: 76561198012345678
+
+Collection title:   My Favorite Mods
+Visibility:         private
+Items to include:   3
+Creating collection (batch size: 10)...
+  [3/3] Added: 3, Failed: 0
+
+Collection created (id 305676543).
+  https://steamcommunity.com/sharedfiles/filedetails/?id=305676543
+Items added: 3, Failed: 0
+```
+
+Notes:
+
+- The new collection defaults to **private** visibility. Use `--collection-visibility`
+  with `public`, `friends`, `private`, or `unlisted` to change it.
+- The collection is created for the active `--appid`, and its items should belong to
+  the same game.
+- The first time an account creates Workshop content, Steam may require you to accept
+  the [Workshop Legal Agreement](https://steamcommunity.com/sharedfiles/workshoplegalagreement)
+  before the collection becomes visible. The tool prints a reminder when this applies.
+- Preview without making changes using `--dry-run`.
 
 ### Using a Different Game
 

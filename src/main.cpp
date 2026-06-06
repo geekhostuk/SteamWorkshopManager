@@ -19,6 +19,14 @@ struct Options {
     uint32_t appId = 410340;
     bool appIdOverridden = false;
     size_t batchSize = 10;
+
+    // Create-collection options
+    bool createCollection = false;
+    std::string collectionTitle;
+    std::string collectionDesc;
+    ERemoteStoragePublishedFileVisibility collectionVisibility = k_ERemoteStoragePublishedFileVisibilityPrivate;
+    bool collectionFromSubscribed = false;
+    std::string collectionFromFile;
 };
 
 static void PrintUsage(const char* programName) {
@@ -29,6 +37,15 @@ static void PrintUsage(const char* programName) {
               << "  --list                 Print all subscribed Workshop items\n"
               << "  --unsubscribe-all      Unsubscribe from all Workshop items\n"
               << "  --restore <file.json>  Subscribe to all items in a backup file\n"
+              << "  --create-collection <title>\n"
+              << "                         Create a Workshop collection and add items to it\n"
+              << "  --collection-desc <text>\n"
+              << "                         Description for the new collection (optional)\n"
+              << "  --collection-visibility <public|friends|private|unlisted>\n"
+              << "                         Visibility of the new collection (default: private)\n"
+              << "  --from-subscribed      Populate collection from current subscriptions\n"
+              << "  --from-file <file.json>\n"
+              << "                         Populate collection from a backup file's items\n"
               << "  --appid <id>           Override AppID (default: 410340)\n"
               << "  --dry-run              Simulate without making changes\n"
               << "  --batch-size <n>       Concurrent operations per batch (default: 10, max: 50)\n"
@@ -67,6 +84,46 @@ static bool ParseArgs(int argc, char* argv[], Options& opts) {
                 return false;
             }
             opts.restoreFile = argv[++i];
+        } else if (arg == "--create-collection") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --create-collection requires a title argument.\n";
+                return false;
+            }
+            opts.createCollection = true;
+            opts.collectionTitle = argv[++i];
+        } else if (arg == "--collection-desc") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --collection-desc requires a text argument.\n";
+                return false;
+            }
+            opts.collectionDesc = argv[++i];
+        } else if (arg == "--collection-visibility") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --collection-visibility requires a value.\n";
+                return false;
+            }
+            std::string vis = argv[++i];
+            if (vis == "public") {
+                opts.collectionVisibility = k_ERemoteStoragePublishedFileVisibilityPublic;
+            } else if (vis == "friends") {
+                opts.collectionVisibility = k_ERemoteStoragePublishedFileVisibilityFriendsOnly;
+            } else if (vis == "private") {
+                opts.collectionVisibility = k_ERemoteStoragePublishedFileVisibilityPrivate;
+            } else if (vis == "unlisted") {
+                opts.collectionVisibility = k_ERemoteStoragePublishedFileVisibilityUnlisted;
+            } else {
+                std::cerr << "Error: Invalid --collection-visibility '" << vis << "'. "
+                          << "Use public, friends, private, or unlisted.\n";
+                return false;
+            }
+        } else if (arg == "--from-subscribed") {
+            opts.collectionFromSubscribed = true;
+        } else if (arg == "--from-file") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --from-file requires a filename argument.\n";
+                return false;
+            }
+            opts.collectionFromFile = argv[++i];
         } else if (arg == "--appid") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --appid requires a numeric argument.\n";
@@ -103,10 +160,25 @@ static bool ParseArgs(int argc, char* argv[], Options& opts) {
     }
 
     // Must specify at least one action
-    if (!opts.backup && !opts.list && !opts.unsubscribeAll && opts.restoreFile.empty()) {
+    if (!opts.backup && !opts.list && !opts.unsubscribeAll && opts.restoreFile.empty() && !opts.createCollection) {
         std::cerr << "Error: No action specified.\n\n";
         PrintUsage(argv[0]);
         return false;
+    }
+
+    // Validate create-collection inputs
+    if (opts.createCollection) {
+        if (opts.collectionTitle.empty()) {
+            std::cerr << "Error: --create-collection requires a non-empty title.\n";
+            return false;
+        }
+        bool hasFileSource = !opts.collectionFromFile.empty();
+        if (opts.collectionFromSubscribed == hasFileSource) {
+            // Both set, or neither set
+            std::cerr << "Error: --create-collection requires exactly one item source: "
+                      << "--from-subscribed or --from-file <file.json>.\n";
+            return false;
+        }
     }
 
     return true;
@@ -205,11 +277,13 @@ static int DoUnsubscribeAll(WorkshopManager& mgr, bool dryRun, size_t batchSize)
     return (result.failed > 0) ? 1 : 0;
 }
 
-static int DoRestore(WorkshopManager& mgr, const std::string& filename, bool dryRun, size_t batchSize) {
+// Reads the "subscriptions" array from a backup JSON file. Prints an error and
+// returns false on failure. When outJson is non-null it receives the parsed document.
+static bool ReadSubscriptionsFile(const std::string& filename, std::vector<uint64_t>& outItems, json* outJson = nullptr) {
     std::ifstream f(filename);
     if (!f.is_open()) {
         std::cerr << "Error: Could not open " << filename << "\n";
-        return 1;
+        return false;
     }
 
     json j;
@@ -217,15 +291,26 @@ static int DoRestore(WorkshopManager& mgr, const std::string& filename, bool dry
         f >> j;
     } catch (const json::parse_error& e) {
         std::cerr << "Error: Failed to parse JSON: " << e.what() << "\n";
-        return 1;
+        return false;
     }
 
     if (!j.contains("subscriptions") || !j["subscriptions"].is_array()) {
         std::cerr << "Error: JSON file missing 'subscriptions' array.\n";
+        return false;
+    }
+
+    outItems = j["subscriptions"].get<std::vector<uint64_t>>();
+    if (outJson) *outJson = std::move(j);
+    return true;
+}
+
+static int DoRestore(WorkshopManager& mgr, const std::string& filename, bool dryRun, size_t batchSize) {
+    json j;
+    std::vector<uint64_t> subscriptions;
+    if (!ReadSubscriptionsFile(filename, subscriptions, &j)) {
         return 1;
     }
 
-    auto subscriptions = j["subscriptions"].get<std::vector<uint64_t>>();
     if (subscriptions.empty()) {
         std::cout << "No subscriptions in backup file.\n";
         return 0;
@@ -275,6 +360,88 @@ static int DoRestore(WorkshopManager& mgr, const std::string& filename, bool dry
     return (result.failed > 0) ? 1 : 0;
 }
 
+static const char* VisibilityToString(ERemoteStoragePublishedFileVisibility v) {
+    switch (v) {
+        case k_ERemoteStoragePublishedFileVisibilityPublic:      return "public";
+        case k_ERemoteStoragePublishedFileVisibilityFriendsOnly: return "friends";
+        case k_ERemoteStoragePublishedFileVisibilityPrivate:     return "private";
+        case k_ERemoteStoragePublishedFileVisibilityUnlisted:    return "unlisted";
+        default:                                                 return "unknown";
+    }
+}
+
+static int DoCreateCollection(WorkshopManager& mgr, const Options& opts) {
+    // Resolve the item IDs from the chosen source.
+    std::vector<uint64_t> items;
+    if (opts.collectionFromSubscribed) {
+        items = mgr.GetSubscribedItems();
+    } else {
+        if (!ReadSubscriptionsFile(opts.collectionFromFile, items)) {
+            return 1;
+        }
+    }
+
+    std::cout << "Collection title:   " << opts.collectionTitle << "\n";
+    if (!opts.collectionDesc.empty()) {
+        std::cout << "Description:        " << opts.collectionDesc << "\n";
+    }
+    std::cout << "Visibility:         " << VisibilityToString(opts.collectionVisibility) << "\n";
+    std::cout << "Items to include:   " << items.size() << "\n";
+
+    if (items.empty()) {
+        std::cout << "Warning: no items found for this source; an empty collection will be created.\n";
+    }
+
+    if (opts.dryRun) {
+        std::cout << "[DRY RUN] Would create the collection with these items:\n";
+        for (auto id : items) {
+            std::cout << "  " << id << "\n";
+        }
+        return 0;
+    }
+
+    std::cout << "Creating collection (batch size: " << opts.batchSize << ")...\n";
+    auto result = mgr.CreateCollection(opts.appId, opts.collectionTitle, opts.collectionDesc,
+                                       opts.collectionVisibility, items, opts.batchSize,
+                                       [](size_t completed, size_t total, size_t succeeded, size_t failed) {
+        std::cout << "  [" << completed << "/" << total << "] Added: " << succeeded << ", Failed: " << failed << "\n";
+        std::cout.flush();
+    });
+
+    if (!result.created) {
+        std::cerr << "\nError: Failed to create collection during '" << result.stage << "' stage — "
+                  << EResultToString(result.errorCode) << " (code " << static_cast<int>(result.errorCode) << ")\n";
+        if (result.needsLegalAgreement) {
+            std::cerr << "You must first accept the Steam Workshop Legal Agreement:\n"
+                      << "  https://steamcommunity.com/sharedfiles/workshoplegalagreement\n";
+        }
+        return 1;
+    }
+
+    std::cout << "\nCollection created (id " << result.collectionId << ").\n"
+              << "  https://steamcommunity.com/sharedfiles/filedetails/?id=" << result.collectionId << "\n";
+    std::cout << "Items added: " << result.itemsAdded << ", Failed: " << result.itemsFailed << "\n";
+
+    if (!result.failedItems.empty()) {
+        std::cout << "\nFailed items:\n";
+        for (const auto& f : result.failedItems) {
+            std::cout << "  " << f.id << " — ";
+            if (f.ioFailure) {
+                std::cout << "IO failure (network error)\n";
+            } else {
+                std::cout << EResultToString(f.errorCode) << " (code " << static_cast<int>(f.errorCode) << ")\n";
+            }
+        }
+    }
+
+    if (result.needsLegalAgreement) {
+        std::cout << "\nNote: the collection stays hidden until you accept the Steam Workshop Legal Agreement:\n"
+                  << "  https://steamcommunity.com/sharedfiles/workshoplegalagreement\n";
+    }
+
+    return (result.itemsFailed > 0) ? 1 : 0;
+}
+
 int main(int argc, char* argv[]) {
     Options opts;
     if (!ParseArgs(argc, argv, opts)) {
@@ -309,6 +476,10 @@ int main(int argc, char* argv[]) {
 
     if (result == 0 && !opts.restoreFile.empty()) {
         result = DoRestore(mgr, opts.restoreFile, opts.dryRun, opts.batchSize);
+    }
+
+    if (result == 0 && opts.createCollection) {
+        result = DoCreateCollection(mgr, opts);
     }
 
     mgr.Shutdown();
