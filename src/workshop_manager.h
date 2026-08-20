@@ -22,6 +22,17 @@ struct BatchResult {
     std::vector<FailedItem> failedItems;
 };
 
+struct CollectionResult {
+    bool created = false;
+    uint64_t collectionId = 0;
+    bool needsLegalAgreement = false;
+    EResult errorCode = k_EResultOK;
+    std::string stage;        // "create" | "submit" | "add-items"
+    size_t itemsAdded = 0;
+    size_t itemsFailed = 0;
+    std::vector<FailedItem> failedItems;
+};
+
 // Convert EResult to a human-readable string
 const char* EResultToString(EResult result);
 
@@ -45,9 +56,25 @@ public:
     BatchResult SubscribeBatch(const std::vector<uint64_t>& items, size_t batchSize, ProgressCallback progressCb = nullptr);
     BatchResult UnsubscribeBatch(const std::vector<uint64_t>& items, size_t batchSize, ProgressCallback progressCb = nullptr);
 
+    // Creates a Workshop collection on the logged-in account (scoped to appId) and
+    // populates it with the given workshop item IDs. Blocks until complete.
+    CollectionResult CreateCollection(uint32_t appId,
+                                      const std::string& title,
+                                      const std::string& description,
+                                      ERemoteStoragePublishedFileVisibility visibility,
+                                      const std::vector<uint64_t>& items,
+                                      size_t batchSize,
+                                      ProgressCallback progressCb = nullptr);
+
 private:
     void OnBatchSubscribeResult(RemoteStorageSubscribePublishedFileResult_t* pResult, bool bIOFailure);
     void OnBatchUnsubscribeResult(RemoteStorageUnsubscribePublishedFileResult_t* pResult, bool bIOFailure);
+    void OnBatchAddDependencyResult(AddUGCDependencyResult_t* pResult, bool bIOFailure);
+    void OnCreateItemResult(CreateItemResult_t* pResult, bool bIOFailure);
+    void OnSubmitItemUpdateResult(SubmitItemUpdateResult_t* pResult, bool bIOFailure);
+
+    // Adds each item as a dependency (child) of the collection in batches, with retries.
+    BatchResult AddDependenciesBatch(uint64_t collectionId, const std::vector<uint64_t>& items, size_t batchSize, ProgressCallback progressCb = nullptr);
 
     void WaitForBatch();
 
@@ -65,6 +92,14 @@ private:
 
     std::array<CCallResult<WorkshopManager, RemoteStorageSubscribePublishedFileResult_t>, MAX_BATCH_SIZE> m_subCallResults;
     std::array<CCallResult<WorkshopManager, RemoteStorageUnsubscribePublishedFileResult_t>, MAX_BATCH_SIZE> m_unsubCallResults;
+    std::array<CCallResult<WorkshopManager, AddUGCDependencyResult_t>, MAX_BATCH_SIZE> m_addDepCallResults;
+
+    // Single async-call tracking for CreateItem / SubmitItemUpdate
+    CCallResult<WorkshopManager, CreateItemResult_t> m_createItemCallResult;
+    CCallResult<WorkshopManager, SubmitItemUpdateResult_t> m_submitUpdateCallResult;
+    CreateItemResult_t m_lastCreateItemResult = {};
+    SubmitItemUpdateResult_t m_lastSubmitResult = {};
+    bool m_singleCallDone = false;
 
     // Map from callback PublishedFileId back to slot index
     size_t FindSlotByFileId(uint64_t fileId);
