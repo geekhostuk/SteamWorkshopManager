@@ -120,7 +120,7 @@ void WorkshopManager::OnBatchUnsubscribeResult(RemoteStorageUnsubscribePublished
 }
 
 void WorkshopManager::OnBatchAddDependencyResult(AddUGCDependencyResult_t* pResult, bool bIOFailure) {
-    size_t slot = FindSlotByFileId(pResult->m_nChildPublishedFileID);
+    size_t slot = FindSlotByFileId(pResult->m_nChildPublishedFileId);
     if (slot < MAX_BATCH_SIZE) {
         m_slotResults[slot].completed = true;
         m_slotResults[slot].ioFailure = bIOFailure;

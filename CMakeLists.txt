@@ -43,6 +43,13 @@ else()
         nlohmann_json::nlohmann_json
     )
 
+    # Resolve libsteam_api.so next to the executable at runtime, so the copy
+    # below is actually used and the binary stays runnable if the SDK moves.
+    set_target_properties(steam-subber PROPERTIES
+        BUILD_RPATH "$ORIGIN"
+        INSTALL_RPATH "$ORIGIN"
+    )
+
     # Copy libsteam_api.so to output directory
     add_custom_command(TARGET steam-subber POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different

@@ -36,12 +36,20 @@ CLI tool for managing Steam Workshop subscriptions across multiple accounts. Bac
 
 | Requirement | Details |
 |---|---|
-| **Operating System** | Windows 10/11 (64-bit). Linux is supported but untested. |
+| **Operating System** | Windows 10/11 (64-bit), or Linux (64-bit). Both are tested. |
 | **Steam Client** | Must be installed, running, and logged into the desired account |
-| **Steamworks SDK** | Version 1.64 (see [download instructions](#downloading-the-steamworks-sdk) below) |
+| **Steamworks SDK** | Version 1.64 or 1.65 (see [download instructions](#downloading-the-steamworks-sdk) below) |
 | **CMake** | 3.20 or newer |
 | **C++ Compiler** | MSVC (Visual Studio 2022 Build Tools recommended), or GCC/Clang on Linux |
 | **Internet Connection** | Required during the first build to fetch the nlohmann/json dependency |
+
+Linux additionally needs the Steam client's `steamclient.so` bridge at
+`~/.steam/sdk64` (the Steam client normally creates this symlink itself), and a
+**native** Steam install rather than a Flatpak one — see
+[Troubleshooting](#troubleshooting).
+
+The Linux build is verified on Arch Linux (kernel 7.1) with GCC 16.2, CMake 4.4
+and Steamworks SDK 1.65, against a native Steam client.
 
 ---
 
@@ -50,10 +58,10 @@ CLI tool for managing Steam Workshop subscriptions across multiple accounts. Bac
 The Steamworks SDK is **not** distributed with this project. You must download it yourself:
 
 1. Go to [https://partner.steamgames.com/](https://partner.steamgames.com/) and log in with your Steam account
-2. Navigate to **Documentation > Steamworks SDK** and download the SDK (version 1.64 or compatible)
+2. Navigate to **Documentation > Steamworks SDK** and download the SDK (version 1.64 or 1.65)
 3. Extract the archive so the directory structure looks like:
    ```
-   steamworks_sdk_164/
+   steamworks_sdk_165/
      sdk/
        public/
          steam/
@@ -62,12 +70,29 @@ The Steamworks SDK is **not** distributed with this project. You must download i
            ...
        redistributable_bin/
          win64/
-           steam_api64.dll
+           steam_api64.dll        # Windows
            steam_api64.lib
+         linux64/
+           libsteam_api.so        # Linux
    ```
 4. Note the full path to the `sdk` folder — you will need it for the build step
 
-The default path expected by the build is `C:/Projects/Tools/steamworks_sdk_164/sdk`. If your SDK is elsewhere, you can override this (see [Building from Source](#building-from-source)).
+The default path expected by the build is `C:/Projects/Tools/steamworks_sdk_164/sdk`. This
+is a Windows path, so on Linux you **must** override it (see
+[Building from Source](#building-from-source)).
+
+### A note on SDK versions
+
+The SDK must match the interface versions exported by your installed Steam
+client. Both 1.64 and 1.65 currently work. If you hit a compile error such as
+
+```
+error: 'struct AddUGCDependencyResult_t' has no member named 'm_nChildPublishedFileID';
+       did you mean 'm_nChildPublishedFileId'?
+```
+
+you are on an SDK whose field casing differs from the one the source was
+written against — correct the casing to match your SDK's `isteamugc.h`.
 
 ---
 
@@ -96,19 +121,36 @@ cmake --build build --config Release
 git clone https://github.com/geekhostuk/SteamWorkshopManager.git
 cd SteamWorkshopManager
 
-cmake -B build -DSTEAMWORKS_SDK_DIR="/path/to/steamworks_sdk_164/sdk"
-cmake --build build --config Release
+cmake -B build -DSTEAMWORKS_SDK_DIR="/path/to/steamworks_sdk_165/sdk" -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+**Note:** the default CMake generator on Linux is single-config, so the build
+type must be set at *configure* time with `-DCMAKE_BUILD_TYPE=Release`.
+Passing `--config Release` to `cmake --build` is silently ignored and you will
+get an unoptimized build. The output lands in `build/`, not `build/Release/`.
+
+Linux also requires the Steam client's `steamclient.so` bridge at
+`~/.steam/sdk64`. The Steam client normally creates this symlink itself; if
+`SteamAPI_Init` fails, verify it exists:
+
+```bash
+ls -l ~/.steam/sdk64        # -> ~/.local/share/Steam/linux64
 ```
 
 ### What the Build Does Automatically
 
 - Fetches [nlohmann/json](https://github.com/nlohmann/json) v3.11.3 via CMake FetchContent (first build only)
 - Copies `steam_api64.dll` (Windows) or `libsteam_api.so` (Linux) to the build output directory
-- Creates `steam_appid.txt` containing `410340` (the default AppID) in the build output directory
+- Creates `steam_appid.txt` containing `410340` (the default AppID) in the build output
+  directory. This is a fallback only: the tool sets the `SteamAppId` environment variable
+  for its own process on every run, so it does not depend on this file and never writes to it.
 
 ### Build Output
 
-After building, the output directory (`build/Release/` on Windows) will contain:
+After building, the output directory (`build/Release/` on Windows, `build/` on Linux) will contain:
+
+Windows:
 
 ```
 build/Release/
@@ -117,6 +159,19 @@ build/Release/
   steam_appid.txt         # Default AppID file (410340)
 ```
 
+Linux:
+
+```
+build/
+  steam-subber            # The tool
+  libsteam_api.so         # Steam runtime library (copied from SDK)
+  steam_appid.txt         # Default AppID file (410340)
+```
+
+On Linux the executable is linked with an `$ORIGIN` rpath, so it finds the
+copied `libsteam_api.so` sitting beside it. The whole output directory can be
+moved elsewhere and will still run, even if the SDK is deleted.
+
 ---
 
 ## Initial Setup
@@ -124,7 +179,8 @@ build/Release/
 1. **Make sure Steam is running** and logged into the account you want to manage
 2. **Navigate to the build output directory**:
    ```bash
-   cd build/Release
+   cd build/Release      # Windows
+   cd build              # Linux
    ```
 3. **Verify the tool can connect to Steam**:
    ```bash
@@ -406,8 +462,34 @@ Start with the default. If you see no failures, you can increase the batch size 
 ### "Failed to initialize Steam API"
 
 - **Steam is not running**: Start the Steam client and log in before running the tool
-- **Wrong working directory**: Run the tool from the directory containing `steam_api64.dll` and `steam_appid.txt` (usually `build/Release/`)
+- **Wrong working directory**: On Windows, run the tool from the directory containing
+  `steam_api64.dll` (`build/Release/`). On Linux the executable carries an `$ORIGIN`
+  rpath and finds its own `libsteam_api.so`, so it runs from anywhere. The AppID is
+  set per-process, so `steam_appid.txt` does not need to be in the working directory.
 - **Missing steam_appid.txt**: The build should create this automatically. If missing, create it manually with the content `410340` (or your desired AppID)
+- **AppID you cannot initialize**: `--appid <id>` fails here if Steam cannot start as
+  that app (for example a game you do not own). Only that run is affected — the AppID
+  is set per-process and nothing is written to disk, so later runs are unaffected.
+- **Linux — missing `~/.steam/sdk64`**: `libsteam_api.so` loads the Steam client
+  through this path. It should point at your Steam install's `linux64` directory:
+  ```bash
+  ls -l ~/.steam/sdk64      # -> ~/.local/share/Steam/linux64 (contains steamclient.so)
+  ```
+  Starting the Steam client once normally recreates it.
+- **Linux — Flatpak Steam**: a sandboxed Steam client cannot be reached over the
+  `steam.pipe` IPC socket from a host-side binary. Use a native Steam package, or
+  run the tool inside the Flatpak sandbox.
+
+### Linux: "error while loading shared libraries: libsteam_api.so"
+
+The executable cannot find the Steam runtime library. Confirm `libsteam_api.so`
+sits next to the binary and that the rpath includes `$ORIGIN`:
+
+```bash
+readelf -d ./steam-subber | grep RUNPATH
+```
+
+As a fallback, run with `LD_LIBRARY_PATH=. ./steam-subber --list`.
 
 ### "ISteamUGC interface not available"
 
@@ -431,6 +513,9 @@ Start with the default. If you see no failures, you can increase the batch size 
 
 - Verify the `STEAMWORKS_SDK_DIR` path points to the `sdk` folder (not the parent archive folder)
 - The path should contain `public/steam/steam_api.h`
+- On Linux, the path must also contain `redistributable_bin/linux64/libsteam_api.so`
+- For errors about missing *struct members* rather than missing headers, see
+  [A note on SDK versions](#a-note-on-sdk-versions)
 
 ---
 
