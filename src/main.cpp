@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <cstdlib>
 #include <ctime>
 #include <chrono>
 
@@ -17,7 +18,6 @@ struct Options {
     bool dryRun = false;
     std::string restoreFile;
     uint32_t appId = 410340;
-    bool appIdOverridden = false;
     size_t batchSize = 10;
 
     // Create-collection options
@@ -131,7 +131,6 @@ static bool ParseArgs(int argc, char* argv[], Options& opts) {
             }
             try {
                 opts.appId = static_cast<uint32_t>(std::stoul(argv[++i]));
-                opts.appIdOverridden = true;
             } catch (...) {
                 std::cerr << "Error: Invalid AppID value.\n";
                 return false;
@@ -184,11 +183,20 @@ static bool ParseArgs(int argc, char* argv[], Options& opts) {
     return true;
 }
 
-static void WriteSteamAppIdFile(uint32_t appId) {
-    std::ofstream f("steam_appid.txt");
-    if (f.is_open()) {
-        f << appId << "\n";
-    }
+// Tell the Steam API which AppID to initialize as.
+//
+// This deliberately sets the SteamAppId environment variable rather than
+// writing steam_appid.txt. The environment variable is process-local, so it
+// leaves nothing behind in the working directory, and it takes precedence over
+// an existing steam_appid.txt — which also repairs directories left holding a
+// stale AppID by older versions of this tool.
+static void SetSteamAppId(uint32_t appId) {
+    const std::string value = std::to_string(appId);
+#ifdef _WIN32
+    _putenv_s("SteamAppId", value.c_str());
+#else
+    setenv("SteamAppId", value.c_str(), 1);
+#endif
 }
 
 static int DoList(WorkshopManager& mgr) {
@@ -448,10 +456,10 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Write steam_appid.txt if AppID was overridden
-    if (opts.appIdOverridden) {
-        WriteSteamAppIdFile(opts.appId);
-    }
+    // Always set the AppID for this process — both the default and any
+    // --appid override — so the tool runs from any working directory and
+    // never mutates steam_appid.txt.
+    SetSteamAppId(opts.appId);
 
     WorkshopManager mgr;
     if (!mgr.Initialize()) {
